@@ -6,9 +6,11 @@
 #   already provides CUDA, PyTorch, and several low-level acceleration libraries.
 # - Megatron code is vendored in `models/Megatron`, so it is not installed from PyPI.
 
-transformers
+# Provided by ComfyUI requirements.txt:
+# transformers
+# numpy
+# einops
+
+soundfile
 omegaconf
 lightning
-numpy
-soundfile
-einops
