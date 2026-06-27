@@ -103,6 +103,9 @@ SUPERRES_MODELS = {
 
 DECODER_CONFIG_PATH = os.path.join(DECODER_ROOT, "dac_rvq_1024_64_golden.yaml")
 DECODER_CHECKPOINT_PATH = os.path.join(CHECKPOINTS_DIR, "dac_rvq_2490000.ckpt")
+OUTPUT_FORMAT = "both"
+MP3_BITRATE = "320k"
+FFMPEG_BIN = "ffmpeg"
 
 
 GENRE_OPTIONS = [
@@ -162,8 +165,12 @@ class GenerateRequest:
     backbone_name: str = ""
     superres_name: str = ""
     top_k_bb: int = 50
+    top_p_bb: float = 0.0
     top_k_sr: int = 10
     temperature: float = 1.0
+    return_log_probs: bool = False
+    top_n_logprobs: int = 0
+    return_prompt_top_n_logprobs: bool = False
     superres_text_mode: str = "same_as_backbone"
     raw_user_input: str = ""
     raw_mode: str = ""
@@ -324,6 +331,26 @@ def add_worker_args(parser):
     group.add_argument("--request-json", type=str, default="", help=argparse.SUPPRESS)
     group.add_argument("--result-json", type=str, default="", help=argparse.SUPPRESS)
     group.add_argument("--status-json", type=str, default="", help=argparse.SUPPRESS)
+    group.add_argument("--tokenizer-path", type=str, default="")
+    group.add_argument("--output-dir", type=str, default="")
+    group.add_argument("--output-format", choices=["wav", "mp3", "both"], default="both")
+    group.add_argument("--mp3-bitrate", type=str, default="320k")
+    group.add_argument("--ffmpeg-bin", type=str, default="ffmpeg")
+    group.add_argument("--backbone-name", type=str, default="")
+    group.add_argument("--backbone-path", type=str, default="")
+    group.add_argument("--backbone-vocab-size", type=int, default=0)
+    group.add_argument("--superres-name", type=str, default="")
+    group.add_argument("--superres-path", type=str, default="")
+    group.add_argument("--superres-vocab-size", type=int, default=0)
+    group.add_argument("--decoder-config-path", type=str, default="")
+    group.add_argument("--decoder-checkpoint-path", type=str, default="")
+    group.add_argument("--decoder-sample-rate", type=int, default=0)
+    group.add_argument("--decoder-chunk-size", type=int, default=0)
+    group.add_argument("--decoder-chunk-overlap", type=int, default=-1)
+    group.add_argument("--codec-fps", type=float, default=0.0)
+    group.add_argument("--tokens-per-minute", type=int, default=0)
+    group.add_argument("--backbone-max-prompt-len", type=int, default=0)
+    group.add_argument("--superres-max-prompt-len", type=int, default=0)
     return parser
 
 
@@ -743,7 +770,16 @@ async def stream_backbone_generate(engine, prompt_ids, sampling_params, estimate
 
 
 @torch.inference_mode()
-def generate_backbone(prompt_ids: list[int], top_k: int, temperature: float, duration: int):
+def generate_backbone(
+    prompt_ids: list[int],
+    top_k: int,
+    top_p: float,
+    temperature: float,
+    duration: int,
+    return_log_probs: bool = False,
+    top_n_logprobs: int = 0,
+    return_prompt_top_n_logprobs: bool = False,
+):
     """Run autoregressive backbone decoding and return q0/q1 tokens."""
     from megatron.core.inference.sampling_params import SamplingParams
     from megatron.training import get_args
@@ -756,7 +792,11 @@ def generate_backbone(prompt_ids: list[int], top_k: int, temperature: float, dur
     sampling_params = SamplingParams(
         temperature=float(temperature),
         top_k=int(top_k),
+        top_p=float(top_p),
+        return_log_probs=bool(return_log_probs),
         num_tokens_to_generate=args.num_tokens_to_generate,
+        top_n_logprobs=int(top_n_logprobs),
+        return_prompt_top_n_logprobs=bool(return_prompt_top_n_logprobs),
     )
     estimated_tokens = round(TOKENS_PER_MINUTE * (float(duration) + 0.8))
 
@@ -1014,12 +1054,12 @@ def decode_to_wav(audio_tokens: torch.Tensor, wav_path: str) -> str:
 def wav_to_mp3(wav_path: str, mp3_path: str) -> str:
     """Transcode a generated WAV file into MP3."""
     command = [
-        "ffmpeg",
+        FFMPEG_BIN,
         "-y",
         "-i",
         wav_path,
         "-b:a",
-        "320k",
+        MP3_BITRATE,
         "-ar",
         str(DECODER_SAMPLE_RATE),
         mp3_path,
@@ -1051,11 +1091,21 @@ def write_outputs(
     meta_path = os.path.join(OUTPUT_DIR, meta_filename)
 
     decode_to_wav(audio_tokens, wav_path)
-    try:
-        wav_to_mp3(wav_path, mp3_path)
-    except RuntimeError as exc:
-        print(f"[Worker] MP3 conversion failed, falling back to WAV: {exc}")
-        mp3_filename = wav_filename
+    if OUTPUT_FORMAT in {"mp3", "both"}:
+        try:
+            wav_to_mp3(wav_path, mp3_path)
+        except RuntimeError as exc:
+            print(f"[Worker] MP3 conversion failed, falling back to WAV: {exc}")
+            mp3_filename = wav_filename
+    else:
+        mp3_filename = ""
+
+    if OUTPUT_FORMAT == "mp3" and mp3_filename and mp3_filename != wav_filename:
+        try:
+            os.remove(wav_path)
+            wav_filename = ""
+        except OSError as exc:
+            print(f"[Worker] Failed to remove intermediate WAV: {exc}")
 
     duration_sec = round(audio_tokens.size(2) / CODEC_FPS, 1)
     metadata = {
@@ -1073,8 +1123,12 @@ def write_outputs(
         "backbone_name": backbone_name,
         "superres_name": superres_name,
         "top_k_bb": request.top_k_bb,
+        "top_p_bb": request.top_p_bb,
         "top_k_sr": request.top_k_sr,
         "temperature": request.temperature,
+        "return_log_probs": request.return_log_probs,
+        "top_n_logprobs": request.top_n_logprobs,
+        "return_prompt_top_n_logprobs": request.return_prompt_top_n_logprobs,
         "gpu_id": STATE.gpu_id,
         "seed": STATE.seed,
         "backbone_tokens": backbone_tokens_count,
@@ -1091,6 +1145,8 @@ def write_outputs(
         "status": "ok",
         "mp3_filename": mp3_filename,
         "wav_filename": wav_filename,
+        "metadata_filename": meta_filename,
+        "output_dir": OUTPUT_DIR,
         "duration_sec": duration_sec,
         "backbone_tokens": backbone_tokens_count,
         "gpu_id": STATE.gpu_id,
@@ -1259,8 +1315,12 @@ def run_backbone_stage(request: GenerateRequest) -> dict:
     _, backbone_tokens = generate_backbone(
         prompt_ids=backbone_prompt_ids,
         top_k=int(request.top_k_bb),
+        top_p=float(request.top_p_bb),
         temperature=float(request.temperature),
         duration=int(request.duration),
+        return_log_probs=bool(request.return_log_probs),
+        top_n_logprobs=int(request.top_n_logprobs),
+        return_prompt_top_n_logprobs=bool(request.return_prompt_top_n_logprobs),
     )
     return {
         "status": "ok",
@@ -1494,8 +1554,12 @@ def run_generation(request: GenerateRequest) -> dict:
             _, backbone_tokens = generate_backbone(
                 prompt_ids=backbone_prompt_ids,
                 top_k=int(request.top_k_bb),
+                top_p=float(request.top_p_bb),
                 temperature=float(request.temperature),
                 duration=int(request.duration),
+                return_log_probs=bool(request.return_log_probs),
+                top_n_logprobs=int(request.top_n_logprobs),
+                return_prompt_top_n_logprobs=bool(request.return_prompt_top_n_logprobs),
             )
             if RUNTIME_MODE == "one_shot":
                 release_backbone_for_stage_transition()
@@ -1559,6 +1623,76 @@ def cli_has_flag(argv: list[str], flag: str) -> bool:
     return flag in argv
 
 
+def _cli_int(argv: list[str], flag: str, default: int) -> int:
+    value = cli_value(argv, flag, "")
+    return int(value) if value != "" else default
+
+
+def _cli_float(argv: list[str], flag: str, default: float) -> float:
+    value = cli_value(argv, flag, "")
+    return float(value) if value != "" else default
+
+
+def apply_runtime_config_from_cli(argv: list[str]) -> None:
+    """Apply non-Megatron runtime overrides before model loading begins."""
+    global TOKENIZER_PATH, OUTPUT_DIR, DECODER_CONFIG_PATH, DECODER_CHECKPOINT_PATH
+    global DECODER_SAMPLE_RATE, DECODER_CHUNK_SIZE, DECODER_CHUNK_OVERLAP
+    global CODEC_FPS, TOKENS_PER_MINUTE, BACKBONE_MAX_PROMPT_LEN, SUPERRES_MAX_PROMPT_LEN
+    global OUTPUT_FORMAT, MP3_BITRATE, FFMPEG_BIN
+
+    tokenizer_path = cli_value(argv, "--tokenizer-path", "")
+    if tokenizer_path:
+        TOKENIZER_PATH = tokenizer_path
+
+    output_dir = cli_value(argv, "--output-dir", "")
+    if output_dir:
+        OUTPUT_DIR = output_dir
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    OUTPUT_FORMAT = cli_value(argv, "--output-format", OUTPUT_FORMAT) or OUTPUT_FORMAT
+    MP3_BITRATE = cli_value(argv, "--mp3-bitrate", MP3_BITRATE) or MP3_BITRATE
+    FFMPEG_BIN = cli_value(argv, "--ffmpeg-bin", FFMPEG_BIN) or FFMPEG_BIN
+
+    backbone_name = cli_value(argv, "--backbone-name", "") or default_backbone_name("")
+    backbone_path = cli_value(argv, "--backbone-path", "")
+    backbone_vocab_size = _cli_int(argv, "--backbone-vocab-size", 0)
+    if backbone_path or backbone_vocab_size:
+        base = BACKBONE_MODELS.get(backbone_name, next(iter(BACKBONE_MODELS.values()))).copy()
+        if backbone_path:
+            base["path"] = backbone_path
+        if backbone_vocab_size:
+            base["vocab_size"] = backbone_vocab_size
+        BACKBONE_MODELS.clear()
+        BACKBONE_MODELS[backbone_name] = base
+
+    superres_name = cli_value(argv, "--superres-name", "") or default_superres_name("")
+    superres_path = cli_value(argv, "--superres-path", "")
+    superres_vocab_size = _cli_int(argv, "--superres-vocab-size", 0)
+    if superres_path or superres_vocab_size:
+        base = SUPERRES_MODELS.get(superres_name, next(iter(SUPERRES_MODELS.values()))).copy()
+        if superres_path:
+            base["path"] = superres_path
+        if superres_vocab_size:
+            base["vocab_size"] = superres_vocab_size
+        SUPERRES_MODELS.clear()
+        SUPERRES_MODELS[superres_name] = base
+
+    decoder_config_path = cli_value(argv, "--decoder-config-path", "")
+    if decoder_config_path:
+        DECODER_CONFIG_PATH = decoder_config_path
+    decoder_checkpoint_path = cli_value(argv, "--decoder-checkpoint-path", "")
+    if decoder_checkpoint_path:
+        DECODER_CHECKPOINT_PATH = decoder_checkpoint_path
+
+    DECODER_SAMPLE_RATE = _cli_int(argv, "--decoder-sample-rate", DECODER_SAMPLE_RATE)
+    DECODER_CHUNK_SIZE = _cli_int(argv, "--decoder-chunk-size", DECODER_CHUNK_SIZE)
+    DECODER_CHUNK_OVERLAP = _cli_int(argv, "--decoder-chunk-overlap", DECODER_CHUNK_OVERLAP)
+    CODEC_FPS = _cli_float(argv, "--codec-fps", CODEC_FPS)
+    TOKENS_PER_MINUTE = _cli_int(argv, "--tokens-per-minute", TOKENS_PER_MINUTE)
+    BACKBONE_MAX_PROMPT_LEN = _cli_int(argv, "--backbone-max-prompt-len", BACKBONE_MAX_PROMPT_LEN)
+    SUPERRES_MAX_PROMPT_LEN = _cli_int(argv, "--superres-max-prompt-len", SUPERRES_MAX_PROMPT_LEN)
+
+
 def load_request_from_json(path: str) -> GenerateRequest:
     if not path:
         raise ValueError("Missing --request-json. Core inference mode expects a JSON request file.")
@@ -1591,6 +1725,7 @@ def main() -> None:
     status_json = cli_value(_sys.argv, "--status-json", "")
     child_once = cli_has_flag(_sys.argv, "--child-once")
     RUNTIME_MODE = runtime_mode
+    apply_runtime_config_from_cli(_sys.argv)
 
     STATE.gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
     STATE.seed = int(cli_value(_sys.argv, "--seed", "0") or 0)
