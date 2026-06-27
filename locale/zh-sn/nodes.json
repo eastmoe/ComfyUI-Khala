@@ -1,0 +1,360 @@
+{
+  "nodes": {
+    "KhalaModelLoader": {
+      "title": "Khala 模型加载",
+      "description": "从 ComfyUI/models/Khala 下解析 Khala tokenizer、backbone、super-resolution 与 DAC RVQ decoder 的路径，并输出给推理节点使用的模型配置。",
+      "inputs": {
+        "model_folder": {
+          "label": "模型目录",
+          "tooltip": "相对于 ComfyUI/models/Khala 的模型根目录。使用 . 表示直接使用 Khala 根目录。",
+          "comment": "目录通常包含 checkpoints/backbone、checkpoints/superresolution 和 checkpoints/dac_rvq_2490000.ckpt。"
+        },
+        "backbone_name": {
+          "label": "Backbone 名称",
+          "tooltip": "写入 Khala 请求的 backbone 模型名。",
+          "comment": "默认值来自 Khala 源码 BACKBONE_MODELS。"
+        },
+        "backbone_subdir": {
+          "label": "Backbone 路径",
+          "tooltip": "backbone checkpoint 目录，相对于模型目录。",
+          "comment": "默认 checkpoints/backbone。"
+        },
+        "backbone_vocab_size": {
+          "label": "Backbone 词表大小",
+          "tooltip": "Megatron backbone 的 vocab_size/padded_vocab_size。",
+          "comment": "默认 130304。"
+        },
+        "superres_name": {
+          "label": "超分模型名称",
+          "tooltip": "写入 Khala 请求的 super-resolution 模型名。",
+          "comment": "默认值来自 Khala 源码 SUPERRES_MODELS。"
+        },
+        "superres_subdir": {
+          "label": "超分模型路径",
+          "tooltip": "super-resolution checkpoint 目录，相对于模型目录。",
+          "comment": "默认 checkpoints/superresolution。"
+        },
+        "superres_vocab_size": {
+          "label": "超分词表大小",
+          "tooltip": "Megatron super-resolution 的 vocab_size/padded_vocab_size。",
+          "comment": "默认 193792。"
+        },
+        "tokenizer_subdir": {
+          "label": "Tokenizer 路径",
+          "tooltip": "文本 tokenizer 目录，相对于模型目录。",
+          "comment": "若模型目录未提供 tokenizer，会回退到插件自带 Khala/models/Tokenizer。"
+        },
+        "decoder_config_path": {
+          "label": "Decoder 配置",
+          "tooltip": "DAC RVQ decoder YAML 配置路径，相对于模型目录。",
+          "comment": "若模型目录未提供配置，会回退到插件自带配置。"
+        },
+        "decoder_checkpoint_path": {
+          "label": "Decoder 权重",
+          "tooltip": "DAC RVQ decoder checkpoint 路径，相对于模型目录。",
+          "comment": "默认 checkpoints/dac_rvq_2490000.ckpt。"
+        },
+        "decoder_sample_rate": {
+          "label": "Decoder 采样率",
+          "tooltip": "输出音频采样率。",
+          "comment": "默认 44100。"
+        },
+        "decoder_chunk_size": {
+          "label": "Decoder 分块大小",
+          "tooltip": "DAC RVQ 解码时每块 token 数。",
+          "comment": "默认 1920。"
+        },
+        "decoder_chunk_overlap": {
+          "label": "Decoder 分块重叠",
+          "tooltip": "DAC RVQ 解码分块之间的重叠 token 数。",
+          "comment": "默认 480。"
+        },
+        "codec_fps": {
+          "label": "Codec FPS",
+          "tooltip": "音频 token 到秒数的换算帧率。",
+          "comment": "默认 21.5。"
+        },
+        "output_dir": {
+          "label": "输出目录",
+          "tooltip": "Khala 生成 WAV/MP3/JSON 的目录。",
+          "comment": "默认为 ComfyUI 输出目录下的 Khala 子目录。"
+        },
+        "output_format": {
+          "label": "输出格式",
+          "tooltip": "选择 wav、mp3 或 both。",
+          "comment": "AUDIO 输出优先读取 WAV；只输出 MP3 时需要 torchaudio。"
+        },
+        "mp3_bitrate": {
+          "label": "MP3 码率",
+          "tooltip": "ffmpeg MP3 转码码率。",
+          "comment": "默认 320k。"
+        },
+        "ffmpeg_bin": {
+          "label": "ffmpeg 程序",
+          "tooltip": "ffmpeg 可执行文件名或路径。",
+          "comment": "生成 MP3 时使用。"
+        },
+        "python_executable": {
+          "label": "Python 程序",
+          "tooltip": "运行 Khala 推理子进程的 Python。",
+          "comment": "默认使用当前 ComfyUI 的 Python。"
+        },
+        "gpu_id": {
+          "label": "GPU ID",
+          "tooltip": "传给 CUDA_VISIBLE_DEVICES 的 GPU 编号。",
+          "comment": "默认 0。"
+        },
+        "master_addr": {
+          "label": "Master 地址",
+          "tooltip": "Megatron 分布式初始化地址。",
+          "comment": "单卡默认 127.0.0.1。"
+        },
+        "master_port": {
+          "label": "Master 端口",
+          "tooltip": "Megatron 分布式初始化端口。",
+          "comment": "端口冲突时换一个未占用端口。"
+        },
+        "tensor_model_parallel_size": {
+          "label": "张量并行大小",
+          "tooltip": "Megatron tensor-model-parallel-size。",
+          "comment": "单卡默认 1。"
+        },
+        "pipeline_model_parallel_size": {
+          "label": "流水线并行大小",
+          "tooltip": "Megatron pipeline-model-parallel-size。",
+          "comment": "单卡默认 1。"
+        },
+        "tokenizer_type": {
+          "label": "Megatron Tokenizer 类型",
+          "tooltip": "传给 Megatron 的 tokenizer-type。",
+          "comment": "Khala 默认 NullTokenizer。"
+        },
+        "norm_epsilon": {
+          "label": "Norm epsilon",
+          "tooltip": "Megatron norm-epsilon。",
+          "comment": "默认 1e-6。"
+        },
+        "inference_max_seq_length": {
+          "label": "最大推理序列长度",
+          "tooltip": "Megatron inference-max-seq-length。",
+          "comment": "默认 25600。"
+        },
+        "inference_max_requests": {
+          "label": "最大推理请求数",
+          "tooltip": "Megatron inference-max-requests；0 表示不显式传入。",
+          "comment": "通常保持 0。"
+        },
+        "inference_batch_times_seqlen_threshold": {
+          "label": "批量序列阈值",
+          "tooltip": "Megatron inference-batch-times-seqlen-threshold；0 表示不显式传入。",
+          "comment": "高级调度参数。"
+        },
+        "transformer_impl": {
+          "label": "Transformer 实现",
+          "tooltip": "local 或 transformer_engine。",
+          "comment": "local 使用 Khala SDPA 兜底；transformer_engine 需要对应环境。"
+        },
+        "attention_backend": {
+          "label": "注意力后端",
+          "tooltip": "sdpa、auto、flash、fused、unfused 或 local。",
+          "comment": "sdpa 会映射到 Megatron unfused 并启用 Khala 的 PyTorch SDPA fallback。"
+        },
+        "dtype": {
+          "label": "精度",
+          "tooltip": "Megatron 参数精度：bf16、fp16 或 fp32。",
+          "comment": "默认 bf16。"
+        },
+        "stream": {
+          "label": "流式进度",
+          "tooltip": "是否让 backbone 生成过程流式更新进度。",
+          "comment": "默认开启。"
+        },
+        "enable_cuda_graph": {
+          "label": "启用 CUDA Graph",
+          "tooltip": "为 backbone 启用 CUDA graph warmup。",
+          "comment": "需要环境支持；默认关闭。"
+        },
+        "flash_decode": {
+          "label": "启用 Flash Decode",
+          "tooltip": "启用 Megatron flash decode。",
+          "comment": "需要环境支持；默认关闭。"
+        },
+        "tokens_per_minute": {
+          "label": "每分钟 Tokens",
+          "tooltip": "Khala 用于按时长估算生成 token 数的比例。",
+          "comment": "默认 2584。"
+        },
+        "backbone_max_prompt_len": {
+          "label": "Backbone 最大提示长度",
+          "tooltip": "backbone prompt token 截断上限。",
+          "comment": "默认 4096。"
+        },
+        "superres_max_prompt_len": {
+          "label": "超分最大提示长度",
+          "tooltip": "super-resolution prompt token 截断上限。",
+          "comment": "默认 2048。"
+        }
+      },
+      "outputs": {
+        "khala_model": {
+          "label": "Khala 模型",
+          "tooltip": "传给 Khala 推理节点的已解析模型配置。",
+          "comment": "包含模型、decoder、输出和 Megatron runtime 参数。"
+        },
+        "model_info": {
+          "label": "模型信息",
+          "tooltip": "解析后的配置 JSON。",
+          "comment": "用于检查实际路径。"
+        }
+      }
+    },
+    "KhalaInference": {
+      "title": "Khala 推理",
+      "description": "调用 Khala 核心推理入口生成音乐，输出 ComfyUI AUDIO、音频路径、元数据 JSON 和后端结果 JSON。",
+      "inputs": {
+        "khala_model": {
+          "label": "Khala 模型",
+          "tooltip": "连接 Khala 模型加载节点的输出。",
+          "comment": "包含已解析的模型路径和运行时参数。"
+        },
+        "description": {
+          "label": "描述",
+          "tooltip": "音乐风格、情绪、编曲、歌声等自然语言描述。",
+          "comment": "对应 Khala request.description。"
+        },
+        "lyrics": {
+          "label": "歌词",
+          "tooltip": "可选歌词文本。",
+          "comment": "留空可生成无歌词或由描述控制。"
+        },
+        "genre": {
+          "label": "风格",
+          "tooltip": "Khala 支持的 genre 枚举。",
+          "comment": "默认 Pop。"
+        },
+        "language": {
+          "label": "语言",
+          "tooltip": "Chinese、English、Japanese、Korean、Cantonese 或 Instrumental。",
+          "comment": "器乐请选择 Instrumental。"
+        },
+        "tags": {
+          "label": "标签",
+          "tooltip": "附加风格标签。",
+          "comment": "对应 Khala request.tags。"
+        },
+        "duration": {
+          "label": "时长（分钟）",
+          "tooltip": "请求生成时长，单位分钟。",
+          "comment": "Khala 源码使用 duration minute 参与 prompt 和 token 估算。"
+        },
+        "superres_text_mode": {
+          "label": "超分文本模式",
+          "tooltip": "same_as_backbone、same_as_backbone_no_description 或 separate。",
+          "comment": "控制 super-resolution 阶段使用的文本提示。"
+        },
+        "sampling_method": {
+          "label": "Backbone 采样方式",
+          "tooltip": "top_k、top_p 或 greedy。",
+          "comment": "top_k 与 top_p 互斥。"
+        },
+        "top_k_bb": {
+          "label": "Backbone Top K",
+          "tooltip": "backbone 采样 top_k。",
+          "comment": "top_k 模式默认 50；greedy 会强制为 1。"
+        },
+        "top_p_bb": {
+          "label": "Backbone Top P",
+          "tooltip": "backbone 采样 top_p。",
+          "comment": "top_p 模式默认可用 0.95；top_k 模式设为 0。"
+        },
+        "top_k_sr": {
+          "label": "超分 Top K",
+          "tooltip": "super-resolution 阶段 top_k。",
+          "comment": "Khala superres 当前使用 top-k projection sampling。"
+        },
+        "temperature": {
+          "label": "温度",
+          "tooltip": "backbone 生成温度。",
+          "comment": "默认 1.0。"
+        },
+        "num_tokens_to_generate": {
+          "label": "生成 Token 数",
+          "tooltip": "Megatron num-tokens-to-generate。",
+          "comment": "默认 23552。"
+        },
+        "return_log_probs": {
+          "label": "返回 Log Probs",
+          "tooltip": "是否让 backbone 返回 log probabilities。",
+          "comment": "对应 Khala return_log_probs。"
+        },
+        "top_n_logprobs": {
+          "label": "Top N Logprobs",
+          "tooltip": "返回前 N 个候选 token 的 logprobs。",
+          "comment": "0 表示不请求。"
+        },
+        "return_prompt_top_n_logprobs": {
+          "label": "返回提示词 Logprobs",
+          "tooltip": "是否返回 prompt token 的 top-n logprobs。",
+          "comment": "对应 Khala return_prompt_top_n_logprobs。"
+        },
+        "seed": {
+          "label": "随机种子",
+          "tooltip": "Megatron 初始化 seed。",
+          "comment": "默认 1283。"
+        },
+        "seed_override": {
+          "label": "请求种子覆盖",
+          "tooltip": "大于 0 时覆盖本次请求使用的子进程 seed。",
+          "comment": "对应 Khala request.seed_override。"
+        },
+        "auto_release_vram": {
+          "label": "推理后释放显存",
+          "tooltip": "开启后使用 one_shot 分阶段子进程，阶段结束即释放模型显存。",
+          "comment": "关闭时使用 keep_loaded 路径，但本插件仍通过外部进程运行，进程退出后显存会释放。"
+        },
+        "raw_user_input": {
+          "label": "原始用户输入",
+          "tooltip": "写入元数据的原始输入文本。",
+          "comment": "不直接改变 prompt，便于记录上游界面内容。"
+        },
+        "raw_mode": {
+          "label": "原始模式",
+          "tooltip": "写入元数据的模式标记。",
+          "comment": "对应 Khala raw_mode。"
+        },
+        "raw_prompt_mode": {
+          "label": "原始提示模式",
+          "tooltip": "写入元数据的 prompt 模式标记。",
+          "comment": "对应 Khala raw_prompt_mode。"
+        },
+        "extra_megatron_args": {
+          "label": "额外 Megatron 参数",
+          "tooltip": "按空格拆分后追加到 Khala worker/Megatron 参数尾部。",
+          "comment": "用于源码已支持但节点未单独暴露的高级参数。"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "label": "音频",
+          "tooltip": "生成的 ComfyUI AUDIO。",
+          "comment": "优先从 WAV 读取。"
+        },
+        "audio_path": {
+          "label": "音频路径",
+          "tooltip": "生成音频文件路径。",
+          "comment": "优先返回 WAV；没有 WAV 时返回 MP3。"
+        },
+        "metadata_json": {
+          "label": "元数据 JSON",
+          "tooltip": "Khala 写出的 metadata JSON 内容。",
+          "comment": "包含模型名、采样参数、seed、时长等。"
+        },
+        "result_json": {
+          "label": "结果 JSON",
+          "tooltip": "Khala backend_worker 的结构化结果。",
+          "comment": "用于调试状态和输出文件名。"
+        }
+      }
+    }
+  }
+}
