@@ -17,6 +17,11 @@ REQUEST_JSON=""
 RESULT_JSON=""
 RUNTIME_MODE=one_shot
 BASE_SEED=1283
+TRANSFORMER_IMPL=local
+ATTENTION_BACKEND=sdpa
+ENABLE_CUDA_GRAPH=0
+FLASH_DECODE=0
+EXTRA_MEGATRON_ARGS=()
 
 MEGATRON_ARGS=(
     --tensor-model-parallel-size 1
@@ -26,8 +31,6 @@ MEGATRON_ARGS=(
     --num-tokens-to-generate 23552
     --inference-max-seq-length 25600
     --stream
-    --enable-cuda-graph
-    --flash-decode
     --bf16
 )
 
@@ -42,6 +45,11 @@ Options:
   --result-json <path>    Optional JSON result file. If omitted, result prints to stdout.
   --runtime-mode <mode>   one_shot or keep_loaded. Default: one_shot
   --seed <int>            Generation seed. Default: 1283
+  --transformer-impl <v>  local or transformer_engine. Default: local
+  --attention-backend <v> sdpa, auto, flash, fused, unfused, or local. Default: sdpa
+  --enable-cuda-graph     Enable Megatron CUDA graph warmup.
+  --flash-decode          Enable Megatron flash decode.
+  --                      Forward remaining arguments to backend_worker.py / Megatron.
   --help                  Show this help message
 EOF
 }
@@ -73,6 +81,29 @@ while [[ $# -gt 0 ]]; do
             BASE_SEED="$2"
             shift 2
             ;;
+        --transformer-impl)
+            [[ $# -ge 2 ]] || { echo "ERROR: --transformer-impl requires a value."; exit 1; }
+            TRANSFORMER_IMPL="$2"
+            shift 2
+            ;;
+        --attention-backend)
+            [[ $# -ge 2 ]] || { echo "ERROR: --attention-backend requires a value."; exit 1; }
+            ATTENTION_BACKEND="$2"
+            shift 2
+            ;;
+        --enable-cuda-graph)
+            ENABLE_CUDA_GRAPH=1
+            shift
+            ;;
+        --flash-decode)
+            FLASH_DECODE=1
+            shift
+            ;;
+        --)
+            shift
+            EXTRA_MEGATRON_ARGS+=("$@")
+            break
+            ;;
         --help|-h)
             usage
             exit 0
@@ -91,6 +122,31 @@ done
     echo "ERROR: --runtime-mode must be one_shot or keep_loaded."
     exit 1
 }
+[[ "$TRANSFORMER_IMPL" == "local" || "$TRANSFORMER_IMPL" == "transformer_engine" ]] || {
+    echo "ERROR: --transformer-impl must be local or transformer_engine."
+    exit 1
+}
+case "$ATTENTION_BACKEND" in
+    sdpa)
+        MEGATRON_ATTENTION_BACKEND=unfused
+        ;;
+    auto|flash|fused|unfused|local)
+        MEGATRON_ATTENTION_BACKEND="$ATTENTION_BACKEND"
+        ;;
+    *)
+        echo "ERROR: --attention-backend must be sdpa, auto, flash, fused, unfused, or local."
+        exit 1
+        ;;
+esac
+
+MEGATRON_ARGS+=(--transformer-impl "$TRANSFORMER_IMPL")
+MEGATRON_ARGS+=(--attention-backend "$MEGATRON_ATTENTION_BACKEND")
+if [[ "$ENABLE_CUDA_GRAPH" == "1" ]]; then
+    MEGATRON_ARGS+=(--enable-cuda-graph)
+fi
+if [[ "$FLASH_DECODE" == "1" ]]; then
+    MEGATRON_ARGS+=(--flash-decode)
+fi
 
 cd "$SCRIPT_DIR"
 export PYTHONPATH="$PROJECT_ROOT:$MEGATRON_ROOT:$DECODER_ROOT:${PYTHONPATH:-}"
@@ -98,6 +154,7 @@ export CUDA_VISIBLE_DEVICES="$GPU_ID"
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT="${MASTER_PORT:-8791}"
 export PYTHONUNBUFFERED=1
+export KHALA_ATTENTION_BACKEND="$ATTENTION_BACKEND"
 
 cmd=(
     python backend_worker.py
@@ -105,6 +162,7 @@ cmd=(
     --seed "$BASE_SEED"
     --request-json "$REQUEST_JSON"
     "${MEGATRON_ARGS[@]}"
+    "${EXTRA_MEGATRON_ARGS[@]}"
 )
 
 if [[ -n "$RESULT_JSON" ]]; then

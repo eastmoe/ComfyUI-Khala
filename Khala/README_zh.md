@@ -63,4 +63,24 @@ cd backend
 bash run_backend.sh --gpus 0 --request-json request.json --result-json result.json
 ```
 
+默认推理路径使用 Megatron 的 `local` transformer 实现，并使用便携的
+`sdpa` attention 配置。launcher 会向 Megatron 传入兼容的 `unfused`
+backend，并在本地 attention 层内启用 Khala 的 PyTorch SDPA fallback，用作不依赖
+NVIDIA Transformer Engine 的托底路径。
+
+如需显式启用 Transformer Engine 和更激进的 attention 加速，可以传入：
+
+```bash
+python inference.py --prompt "A bright pop song." \
+  --transformer-impl transformer_engine \
+  --attention-backend auto \
+  --enable-cuda-graph \
+  --flash-decode
+```
+
+`--attention-backend` 可选 `sdpa`、`auto`、`flash`、`fused`、`unfused`、
+`local`。`flash` / `auto` 需要运行环境里有对应 CUDA attention 栈。当前
+vendored Megatron 的 GPT 推理路径没有暴露 Sage Attention 或独立的 Triton
+attention backend。
+
 生成音频会写入 `backend/generated_audio/`，结构化结果会写入指定的 result JSON。

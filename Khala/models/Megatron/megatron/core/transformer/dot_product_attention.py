@@ -2,9 +2,11 @@
 
 
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from megatron.core import parallel_state, tensor_parallel
@@ -129,6 +131,49 @@ class DotProductAttention(MegatronModule):
         else:
             raise ValueError("Softmax type not supported")
 
+    def _sdpa_forward(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attention_mask: Tensor,
+    ) -> Tensor:
+        """Portable PyTorch SDPA path used by Khala when fused kernels are unavailable."""
+        if self.config.softmax_type != "vanilla":
+            raise RuntimeError("Khala SDPA fallback only supports vanilla attention softmax.")
+
+        if self.num_attention_heads_per_partition // self.num_query_groups_per_partition > 1:
+            key = key.repeat_interleave(
+                self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=2
+            )
+            value = value.repeat_interleave(
+                self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=2
+            )
+
+        query = query.permute(1, 2, 0, 3).contiguous()
+        key = key.permute(1, 2, 0, 3).contiguous()
+        value = value.permute(1, 2, 0, 3).contiguous()
+
+        is_causal = attention_mask is None and self.attn_mask_type == AttnMaskType.causal
+        sdpa_mask = None
+        if attention_mask is not None:
+            if attention_mask.dtype == torch.bool:
+                sdpa_mask = ~attention_mask.to(device=query.device)
+            else:
+                sdpa_mask = attention_mask.to(device=query.device, dtype=query.dtype)
+
+        context = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=sdpa_mask,
+            dropout_p=self.config.attention_dropout if self.training else 0.0,
+            is_causal=is_causal,
+            scale=self.softmax_scale,
+        )
+        context = context.permute(2, 0, 1, 3).contiguous()
+        return context.view(*context.size()[:-2], self.hidden_size_per_partition)
+
     def forward(
         self,
         query: Tensor,
@@ -145,6 +190,9 @@ class DotProductAttention(MegatronModule):
             "Please use TEDotProductAttention instead."
         )
         assert attention_bias is None, "Attention bias is not supported for DotProductAttention."
+
+        if os.getenv("KHALA_ATTENTION_BACKEND", "").lower() == "sdpa":
+            return self._sdpa_forward(query, key, value, attention_mask)
 
         # ===================================
         # Raw attention scores. [b, n/p, s, s]

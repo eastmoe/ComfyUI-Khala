@@ -63,6 +63,26 @@ cd backend
 bash run_backend.sh --gpus 0 --request-json request.json --result-json result.json
 ```
 
+The default inference path uses Megatron's local transformer implementation and
+the portable `sdpa` attention setting. The launcher passes Megatron's `unfused`
+backend for compatibility and enables a Khala PyTorch SDPA fallback inside the
+local attention layer. This avoids requiring NVIDIA Transformer Engine.
+
+To opt into Transformer Engine and faster attention paths, pass them explicitly:
+
+```bash
+python inference.py --prompt "A bright pop song." \
+  --transformer-impl transformer_engine \
+  --attention-backend auto \
+  --enable-cuda-graph \
+  --flash-decode
+```
+
+Available `--attention-backend` values are `sdpa`, `auto`, `flash`, `fused`,
+`unfused`, and `local`. `flash` / `auto` require the matching CUDA attention
+stack in the runtime. This vendored Megatron tree does not expose Sage Attention
+or a separate Triton attention backend for this GPT inference path.
+
 Generated audio is written under `backend/generated_audio/`; structured metadata is written to the result JSON.
 
 ## Remaining Code

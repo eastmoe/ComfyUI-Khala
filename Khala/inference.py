@@ -23,6 +23,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
 BACKEND_WORKER = BACKEND_DIR / "backend_worker.py"
 
+ATTENTION_BACKEND_MAP = {
+    "auto": "auto",
+    "flash": "flash",
+    "fused": "fused",
+    "unfused": "unfused",
+    "sdpa": "unfused",
+    "local": "local",
+}
+
 
 REQUEST_DEFAULTS: dict[str, Any] = {
     "genre": "Pop",
@@ -171,6 +180,21 @@ def build_parser() -> argparse.ArgumentParser:
     megatron_group.add_argument("--inference-max-seq-length", type=int, default=25600)
     megatron_group.add_argument("--inference-max-requests", type=int, default=None)
     megatron_group.add_argument("--inference-batch-times-seqlen-threshold", type=int, default=None)
+    megatron_group.add_argument(
+        "--transformer-impl",
+        choices=["local", "transformer_engine"],
+        default="local",
+        help="Megatron transformer implementation. Use transformer_engine only when TE is installed.",
+    )
+    megatron_group.add_argument(
+        "--attention-backend",
+        choices=list(ATTENTION_BACKEND_MAP),
+        default="sdpa",
+        help=(
+            "Attention backend. sdpa enables Khala's PyTorch SDPA fallback while "
+            "passing Megatron's unfused backend for parser compatibility."
+        ),
+    )
     add_bool_pair(
         megatron_group,
         "--stream",
@@ -185,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-cuda-graph",
         "--disable-cuda-graph",
         "enable_cuda_graph",
-        True,
+        False,
         "Enable CUDA graph warmup for backbone.",
         "Disable CUDA graph warmup.",
     )
@@ -194,7 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--flash-decode",
         "--no-flash-decode",
         "flash_decode",
-        True,
+        False,
         "Enable Megatron flash decode for backbone.",
         "Disable Megatron flash decode.",
     )
@@ -328,6 +352,10 @@ def build_worker_command(args: argparse.Namespace, request_path: Path) -> list[s
         str(args.num_tokens_to_generate),
         "--inference-max-seq-length",
         str(args.inference_max_seq_length),
+        "--transformer-impl",
+        args.transformer_impl,
+        "--attention-backend",
+        ATTENTION_BACKEND_MAP[args.attention_backend],
     ]
 
     if args.backbone_name:
@@ -367,6 +395,7 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     env["MASTER_ADDR"] = str(args.master_addr)
     env["MASTER_PORT"] = str(args.master_port)
     env["PYTHONUNBUFFERED"] = "1"
+    env["KHALA_ATTENTION_BACKEND"] = args.attention_backend
     return env
 
 
