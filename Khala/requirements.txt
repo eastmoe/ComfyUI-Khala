@@ -10,7 +10,9 @@
 # transformers
 # numpy
 # einops
-
-soundfile
-omegaconf
-lightning
+# pyyaml replaces omegaconf for the decoder YAML used here.
+# torchaudio replaces soundfile for WAV writing.
+# torch.nn.Module replaces lightning.LightningModule for the decoder wrapper.
+# soundfile
+# omegaconf
+# lightning

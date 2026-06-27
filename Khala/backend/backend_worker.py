@@ -510,15 +510,45 @@ def load_superres(name: str) -> None:
     print(f"[Worker] Superres loaded: {selected_name}")
 
 
+def load_decoder_config(path: str) -> dict:
+    """Load the decoder YAML config with the small interpolation subset it uses."""
+    import re
+
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+
+    interpolation_pattern = re.compile(r"^\$\{([A-Za-z0-9_.-]+)\}$")
+
+    def resolve_path(reference: str):
+        value = config
+        for part in reference.split("."):
+            value = value[part]
+        return value
+
+    def resolve(value):
+        if isinstance(value, dict):
+            return {key: resolve(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        if isinstance(value, str):
+            match = interpolation_pattern.match(value)
+            if match:
+                return resolve_path(match.group(1))
+        return value
+
+    return resolve(config)
+
+
 def load_decoder() -> None:
     """Load the DAC RVQ decoder."""
     if RESOURCES["decoder"] is not None:
         return
 
     from dac_rvq import DacRVQ
-    from omegaconf import OmegaConf
 
-    config = OmegaConf.load(DECODER_CONFIG_PATH)
+    config = load_decoder_config(DECODER_CONFIG_PATH)
     decoder = DacRVQ(config)
 
     checkpoint = torch.load(DECODER_CHECKPOINT_PATH, map_location="cuda", weights_only=False)
@@ -907,7 +937,7 @@ def generate_superres(superres_prompt_ids: list[int], backbone_tokens: list[int]
 @torch.inference_mode()
 def decode_to_wav(audio_tokens: torch.Tensor, wav_path: str) -> str:
     """Decode quantized audio tokens into a waveform file."""
-    import soundfile as sf
+    import torchaudio
 
     decoder = RESOURCES["decoder"]
     if decoder is None:
@@ -970,8 +1000,14 @@ def decode_to_wav(audio_tokens: torch.Tensor, wav_path: str) -> str:
         prev_waveform_chunk_len = current_waveform_chunk_len
         del token_chunk, waveform_chunk
 
-    waveform_np = waveform.squeeze(0).numpy().T
-    sf.write(wav_path, waveform_np, DECODER_SAMPLE_RATE)
+    waveform_audio = waveform.squeeze(0).contiguous()
+    torchaudio.save(
+        wav_path,
+        waveform_audio,
+        DECODER_SAMPLE_RATE,
+        encoding="PCM_S",
+        bits_per_sample=16,
+    )
     return wav_path
 
 

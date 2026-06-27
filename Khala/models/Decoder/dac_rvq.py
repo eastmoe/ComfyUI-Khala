@@ -1,12 +1,11 @@
-import lightning as L
 import torch
 import torch.nn as nn
 from dac import Encoder, Decoder
 from rvq import ResidualVectorQuantization
-from typing import List, Dict, Any, Union
+from typing import Union
 
 
-class DacRVQ(L.LightningModule):
+class DacRVQ(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
