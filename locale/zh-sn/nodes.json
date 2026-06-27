@@ -1,5 +1,88 @@
 {
   "nodes": {
+    "KhalaModelDownloader": {
+      "title": "Khala 模型下载",
+      "description": "从 Hugging Face 下载官方 Khala checkpoint 到 ComfyUI/models/Khala，支持 hf-mirror 镜像、关闭 TLS 认证和关闭 HF XET。",
+      "inputs": {
+        "repo_id": {
+          "label": "HF 仓库",
+          "tooltip": "要下载的 Hugging Face model repo id。",
+          "comment": "默认 liujiafeng/Khala-MusicGeneration-v1.0。"
+        },
+        "revision": {
+          "label": "版本",
+          "tooltip": "Hugging Face revision、branch、tag 或 commit。",
+          "comment": "默认 main。"
+        },
+        "model_folder": {
+          "label": "保存目录",
+          "tooltip": "相对于 ComfyUI/models/Khala 的保存目录。",
+          "comment": "默认保存到 Khala-MusicGeneration-v1.0；填 . 可直接保存到 models/Khala 根目录。"
+        },
+        "download_scope": {
+          "label": "下载范围",
+          "tooltip": "required_weights_only 只下载推理必需权重；full_repository 下载仓库全部文件；custom_patterns 使用自定义 allow patterns。",
+          "comment": "Khala 推理必需 backbone、superresolution 和 dac_rvq_2490000.ckpt。"
+        },
+        "use_hf_mirror": {
+          "label": "使用 HF 镜像",
+          "tooltip": "启用后使用 mirror_endpoint 作为 HF_ENDPOINT。",
+          "comment": "默认启用 hf-mirror.com。"
+        },
+        "mirror_endpoint": {
+          "label": "镜像地址",
+          "tooltip": "Hugging Face endpoint，例如 https://hf-mirror.com。",
+          "comment": "关闭使用镜像时会使用 https://huggingface.co。"
+        },
+        "verify_tls": {
+          "label": "验证 TLS",
+          "tooltip": "关闭后 requests 会跳过 HTTPS 证书校验。",
+          "comment": "仅在代理或证书链异常时关闭。"
+        },
+        "disable_hf_xet": {
+          "label": "关闭 HF XET",
+          "tooltip": "设置 HF_HUB_DISABLE_XET=1，并同步 huggingface_hub 常量。",
+          "comment": "默认关闭 XET，改用普通 Hub 下载路径。"
+        },
+        "force_download": {
+          "label": "强制重新下载",
+          "tooltip": "忽略已存在的缓存/文件并重新下载。",
+          "comment": "通常保持关闭以支持断点续传和复用现有文件。"
+        },
+        "max_workers": {
+          "label": "下载并发数",
+          "tooltip": "传给 Hugging Face snapshot_download 的 max_workers。",
+          "comment": "默认 4；网络不稳定时可降到 1。"
+        },
+        "custom_allow_patterns": {
+          "label": "自定义允许模式",
+          "tooltip": "download_scope 为 custom_patterns 时使用，每行或逗号分隔一个模式。",
+          "comment": "例如 backbone/**、superresolution/**、dac_rvq_2490000.ckpt。"
+        },
+        "ignore_patterns": {
+          "label": "忽略模式",
+          "tooltip": "可选 ignore patterns，每行或逗号分隔一个模式。",
+          "comment": "留空表示不额外忽略。"
+        }
+      },
+      "outputs": {
+        "model_folder": {
+          "label": "模型目录",
+          "tooltip": "相对于 ComfyUI/models/Khala 的目录名。",
+          "comment": "可填入 Khala 模型加载节点的模型目录。"
+        },
+        "download_path": {
+          "label": "下载路径",
+          "tooltip": "模型保存的绝对路径。",
+          "comment": "用于检查磁盘位置。"
+        },
+        "summary_json": {
+          "label": "下载摘要",
+          "tooltip": "下载后的文件数量、大小和参数摘要 JSON。",
+          "comment": "用于确认 backbone、superresolution 和 decoder 是否存在。"
+        }
+      }
+    },
     "KhalaModelLoader": {
       "title": "Khala 模型加载",
       "description": "从 ComfyUI/models/Khala 下解析 Khala tokenizer、backbone、super-resolution 与 DAC RVQ decoder 的路径，并输出给推理节点使用的模型配置。",

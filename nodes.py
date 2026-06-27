@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -64,6 +65,15 @@ SUPERRES_TEXT_MODES = [
 
 ATTENTION_BACKENDS = ["sdpa", "auto", "flash", "fused", "unfused", "local"]
 DTYPES = ["bf16", "fp16", "fp32"]
+KHALA_HF_REPO_ID = "liujiafeng/Khala-MusicGeneration-v1.0"
+KHALA_HF_MIRROR_ENDPOINT = "https://hf-mirror.com"
+KHALA_HF_REQUIRED_PATTERNS = [
+    "backbone/*",
+    "backbone/**/*",
+    "superresolution/*",
+    "superresolution/**/*",
+    "dac_rvq_2490000.ckpt",
+]
 
 
 @dataclass
@@ -159,6 +169,92 @@ def first_existing(base: Path, requested: str, alternatives: list[str], fallback
 def require_exists(path: str, label: str) -> None:
     if not Path(path).exists():
         raise FileNotFoundError(f"{label} not found: {path}")
+
+
+def split_patterns(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[\n,]+", value or "") if item.strip()]
+
+
+def summarize_download(path: Path) -> dict[str, Any]:
+    files = [
+        item
+        for item in path.rglob("*")
+        if item.is_file() and ".cache" not in item.relative_to(path).parts
+    ]
+    total_size = sum(item.stat().st_size for item in files)
+
+    def group_summary(relative_prefix: str) -> dict[str, Any]:
+        group = [item for item in files if item.relative_to(path).as_posix().startswith(relative_prefix)]
+        return {
+            "files": len(group),
+            "distcp_files": sum(1 for item in group if item.suffix == ".distcp"),
+            "size_bytes": sum(item.stat().st_size for item in group),
+        }
+
+    return {
+        "path": str(path),
+        "files": len(files),
+        "size_bytes": total_size,
+        "size_gib": round(total_size / (1024**3), 3),
+        "backbone": group_summary("backbone/"),
+        "superresolution": group_summary("superresolution/"),
+        "decoder_checkpoint": {
+            "exists": (path / "dac_rvq_2490000.ckpt").is_file(),
+            "size_bytes": (path / "dac_rvq_2490000.ckpt").stat().st_size
+            if (path / "dac_rvq_2490000.ckpt").is_file()
+            else 0,
+        },
+    }
+
+
+def configure_hf_tls(verify_tls: bool) -> None:
+    try:
+        if not verify_tls:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        try:
+            import httpx
+            import huggingface_hub.utils._http as hf_http
+            from huggingface_hub import set_async_client_factory, set_client_factory
+
+            def client_factory() -> httpx.Client:
+                return httpx.Client(
+                    event_hooks={"request": [hf_http.hf_request_event_hook]},
+                    follow_redirects=True,
+                    timeout=None,
+                    verify=bool(verify_tls),
+                )
+
+            def async_client_factory() -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    event_hooks={
+                        "request": [hf_http.async_hf_request_event_hook],
+                        "response": [hf_http.async_hf_response_event_hook],
+                    },
+                    follow_redirects=True,
+                    timeout=None,
+                    verify=bool(verify_tls),
+                )
+
+            set_client_factory(client_factory)
+            set_async_client_factory(async_client_factory)
+            return
+        except ImportError:
+            pass
+
+        import requests
+        from huggingface_hub import configure_http_backend
+
+        def backend_factory() -> requests.Session:
+            session = requests.Session()
+            session.verify = bool(verify_tls)
+            return session
+
+        configure_http_backend(backend_factory=backend_factory)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to disable Hugging Face TLS verification: {exc}") from exc
 
 
 def append_value(argv: list[str], flag: str, value: Any) -> None:
@@ -335,6 +431,148 @@ def build_command(
         argv.append("--")
         argv.extend(shlex.split(extra_megatron_args, posix=False))
     return argv
+
+
+class KhalaModelDownloader:
+    DESCRIPTION = (
+        "Downloads the official Khala Hugging Face checkpoint into ComfyUI/models/Khala. "
+        "Supports hf-mirror.com, disabled TLS verification, and disabled Hugging Face Xet."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "repo_id": ("STRING", {"default": KHALA_HF_REPO_ID}),
+                "revision": ("STRING", {"default": "main"}),
+                "model_folder": ("STRING", {"default": "Khala-MusicGeneration-v1.0"}),
+                "download_scope": (
+                    ["required_weights_only", "full_repository", "custom_patterns"],
+                    {"default": "required_weights_only"},
+                ),
+                "use_hf_mirror": ("BOOLEAN", {"default": True}),
+                "mirror_endpoint": ("STRING", {"default": KHALA_HF_MIRROR_ENDPOINT}),
+                "verify_tls": ("BOOLEAN", {"default": True}),
+                "disable_hf_xet": ("BOOLEAN", {"default": True}),
+                "force_download": ("BOOLEAN", {"default": False}),
+                "max_workers": ("INT", {"default": 4, "min": 1, "max": 32, "step": 1}),
+                "custom_allow_patterns": (
+                    "STRING",
+                    {
+                        "default": "\n".join(KHALA_HF_REQUIRED_PATTERNS),
+                        "multiline": True,
+                    },
+                ),
+                "ignore_patterns": ("STRING", {"default": "", "multiline": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("model_folder", "download_path", "summary_json")
+    OUTPUT_TOOLTIPS = (
+        "Folder name relative to ComfyUI/models/Khala. Use this in Khala Model Loader.",
+        "Absolute path where the model was downloaded.",
+        "Download summary JSON with file counts and sizes.",
+    )
+    FUNCTION = "download"
+    CATEGORY = CATEGORY
+    OUTPUT_NODE = True
+
+    def download(
+        self,
+        repo_id: str,
+        revision: str,
+        model_folder: str,
+        download_scope: str,
+        use_hf_mirror: bool,
+        mirror_endpoint: str,
+        verify_tls: bool,
+        disable_hf_xet: bool,
+        force_download: bool,
+        max_workers: int,
+        custom_allow_patterns: str,
+        ignore_patterns: str,
+    ):
+        target = safe_child_path(khala_models_root(), model_folder)
+        assert target is not None
+        target.mkdir(parents=True, exist_ok=True)
+
+        if disable_hf_xet:
+            os.environ["HF_HUB_DISABLE_XET"] = "1"
+        else:
+            os.environ.pop("HF_HUB_DISABLE_XET", None)
+
+        endpoint = mirror_endpoint.strip() if use_hf_mirror else "https://huggingface.co"
+        if endpoint:
+            os.environ["HF_ENDPOINT"] = endpoint
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise ImportError(
+                "Khala model downloading requires huggingface_hub. "
+                f"Install it with: {sys.executable} -m pip install huggingface_hub"
+            ) from exc
+
+        try:
+            import huggingface_hub.constants as hf_constants
+
+            hf_constants.HF_HUB_DISABLE_XET = bool(disable_hf_xet)
+        except Exception:
+            pass
+
+        configure_hf_tls(bool(verify_tls))
+
+        if download_scope == "required_weights_only":
+            allow_patterns = KHALA_HF_REQUIRED_PATTERNS
+        elif download_scope == "full_repository":
+            allow_patterns = None
+        else:
+            allow_patterns = split_patterns(custom_allow_patterns)
+            if not allow_patterns:
+                raise ValueError("custom_patterns requires at least one allow pattern.")
+
+        ignore = split_patterns(ignore_patterns) or None
+        print(
+            "[Comfy-Khala] Downloading "
+            f"{repo_id}@{revision} to {target} via {endpoint or 'default Hugging Face endpoint'} "
+            f"(scope={download_scope}, verify_tls={verify_tls}, disable_hf_xet={disable_hf_xet})"
+        )
+        download_kwargs = {
+            "repo_id": repo_id.strip() or KHALA_HF_REPO_ID,
+            "repo_type": "model",
+            "revision": revision.strip() or "main",
+            "local_dir": str(target),
+            "endpoint": endpoint or None,
+            "allow_patterns": allow_patterns,
+            "ignore_patterns": ignore,
+            "force_download": bool(force_download),
+            "max_workers": int(max_workers),
+        }
+        try:
+            snapshot_download(**download_kwargs)
+        except OSError as exc:
+            if "Consistency check failed" not in str(exc) or bool(force_download):
+                raise
+            print("[Comfy-Khala] Consistency check failed; retrying once with force_download=True.")
+            download_kwargs["force_download"] = True
+            snapshot_download(**download_kwargs)
+
+        summary = summarize_download(target)
+        summary.update(
+            {
+                "repo_id": repo_id.strip() or KHALA_HF_REPO_ID,
+                "revision": revision.strip() or "main",
+                "endpoint": endpoint or "https://huggingface.co",
+                "download_scope": download_scope,
+                "allow_patterns": allow_patterns or ["<all>"],
+                "ignore_patterns": ignore or [],
+                "verify_tls": bool(verify_tls),
+                "disable_hf_xet": bool(disable_hf_xet),
+                "max_workers": int(max_workers),
+            }
+        )
+        return model_folder.strip() or ".", str(target), json.dumps(summary, ensure_ascii=False, indent=2)
 
 
 class KhalaModelLoader:
@@ -635,11 +873,13 @@ class KhalaInference:
 
 
 NODE_CLASS_MAPPINGS = {
+    "KhalaModelDownloader": KhalaModelDownloader,
     "KhalaModelLoader": KhalaModelLoader,
     "KhalaInference": KhalaInference,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "KhalaModelDownloader": "Khala Model Downloader",
     "KhalaModelLoader": "Khala Model Loader",
     "KhalaInference": "Khala Inference",
 }
