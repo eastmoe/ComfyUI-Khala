@@ -33,7 +33,6 @@ except ImportError:
 
 from megatron.training import get_args, get_timers, get_adlr_autoresume
 from megatron.core import mpu
-from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
 from megatron.core.utils import (
     get_batch_on_this_cp_rank,
@@ -42,6 +41,10 @@ from megatron.core.utils import (
     unwrap_model,
 )
 from megatron.legacy.model.module import param_is_not_shared
+
+
+def get_blend_from_list(_blend_list):
+    raise RuntimeError("Dataset blending is not included in this inference-only Khala build.")
 
 
 def calc_params_l2_norm(model, force_create_fp32_copy=False):

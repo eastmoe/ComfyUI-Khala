@@ -16,10 +16,6 @@ import torch.nn.functional as F
 from packaging.version import Version as PkgVersion
 
 from megatron.core.dist_checkpointing.validation import StrictHandling
-from megatron.core.models.retro.utils import (
-    get_config_path as get_retro_config_path,
-    get_gpt_data_dir as get_retro_data_dir,
-)
 from megatron.core.rerun_state_machine import RerunStateMachine
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
@@ -47,6 +43,15 @@ from megatron.core.quantization.utils import (
     kitchen_quantization_recipe_config,
     load_quantization_recipe,
 )
+
+
+def get_retro_config_path(_retro_project_dir):
+    raise RuntimeError("Retro dataset support is not included in this inference-only Khala build.")
+
+
+def get_retro_data_dir(_retro_project_dir):
+    raise RuntimeError("Retro dataset support is not included in this inference-only Khala build.")
+
 
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""

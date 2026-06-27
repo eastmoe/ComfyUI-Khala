@@ -14,8 +14,6 @@ from megatron.core.datasets.megatron_tokenizer import MegatronLegacyTokenizer
 
 from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer
-from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
-from megatron.training.tokenizer.sft_tokenizer import SFTTokenizer
 
 
 def build_tokenizer(args, **kwargs):
@@ -69,6 +67,8 @@ def build_tokenizer(args, **kwargs):
         assert args.vocab_size is not None
         tokenizer = _NullTokenizer(args.vocab_size)
     elif args.tokenizer_type == "MultimodalTokenizer":
+        from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
+
         try:
             import transformers
         except ImportError:
@@ -97,6 +97,8 @@ def build_tokenizer(args, **kwargs):
             args.force_system_message,
         )
     elif args.tokenizer_type == "SFTTokenizer":
+        from megatron.training.tokenizer.sft_tokenizer import SFTTokenizer
+
         tokenizer = SFTTokenizer(
             args.tokenizer_model,
             args.sft_tokenizer_prompt_format, 
@@ -868,9 +870,8 @@ class _NullMultimodalTokenizer(MegatronLegacyTokenizer):
         self._vocab_size_without_eod = int(vocab_size)
         self._eod_id = self._vocab_size_without_eod
 
-        from megatron.core.models.multimodal.llava_model import DEFAULT_IMAGE_TOKEN_INDEX, IMAGE_TOKEN
-        self._image_token = image_token if image_token is not None else IMAGE_TOKEN
-        self._image_token_id = image_token_id if image_token_id is not None else DEFAULT_IMAGE_TOKEN_INDEX
+        self._image_token = image_token if image_token is not None else "<image>"
+        self._image_token_id = image_token_id if image_token_id is not None else -200
 
     def tokenize(self, text):
         return [int(x) for x in text.split(' ')]

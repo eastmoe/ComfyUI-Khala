@@ -21,15 +21,12 @@ import time
 import traceback
 import uuid
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
 
 
 # ============================================================
@@ -154,7 +151,8 @@ RUNTIME_MODE = "one_shot"
 # ============================================================
 
 
-class GenerateRequest(BaseModel):
+@dataclass
+class GenerateRequest:
     genre: str = "Pop"
     language: str = "Chinese"
     tags: str = ""
@@ -171,13 +169,6 @@ class GenerateRequest(BaseModel):
     raw_mode: str = ""
     raw_prompt_mode: str = ""
     seed_override: int = 0
-
-
-# ============================================================
-# FastAPI app
-# ============================================================
-
-app = FastAPI(title="Music Worker API", version="1.0.0")
 
 
 # ============================================================
@@ -299,12 +290,19 @@ def patch_language_model_embedding() -> None:
 
 
 def add_worker_args(parser):
-    from examples.inference.gpt.utils import add_common_inference_args
-
-    add_common_inference_args(parser)
+    inference_group = parser.add_argument_group(title="inference")
+    inference_group.add_argument("--temperature", type=float, default=1.0)
+    inference_group.add_argument("--top_k", type=int, default=1)
+    inference_group.add_argument("--top_p", type=float, default=0.0)
+    inference_group.add_argument("--return-log-probs", action="store_true", default=False)
+    inference_group.add_argument("--num-tokens-to-generate", type=int, default=30)
+    inference_group.add_argument("--top-n-logprobs", type=int, default=0)
+    inference_group.add_argument("--prompts", metavar="N", type=str, nargs="+")
+    inference_group.add_argument("--model-provider", choices=["mamba", "gpt"], default="gpt")
+    inference_group.add_argument("--output-path", type=str, default=None)
 
     group = parser.add_argument_group(title="worker")
-    group.add_argument("--worker-port", type=int, default=8001, help="FastAPI port")
+    group.add_argument("--worker-port", type=int, default=8001, help=argparse.SUPPRESS)
     group.add_argument(
         "--runtime-mode",
         type=str,
@@ -1345,7 +1343,7 @@ def run_generation_one_shot(request: GenerateRequest) -> dict:
             paths = one_shot_stage_paths(temp_dir)
 
             with open(request_path, "w", encoding="utf-8") as file:
-                json.dump(request.model_dump(), file, ensure_ascii=False, indent=2)
+                json.dump(asdict(request), file, ensure_ascii=False, indent=2)
 
             child_seed = int(request.seed_override) if int(request.seed_override) > 0 else int(STATE.seed)
             stages = [
@@ -1502,45 +1500,6 @@ def run_generation(request: GenerateRequest) -> dict:
 
 
 # ============================================================
-# HTTP endpoints
-# ============================================================
-
-
-@app.get("/health")
-def health():
-    return state_snapshot()
-
-
-@app.get("/config")
-def config():
-    return {
-        "backbone_models": list(BACKBONE_MODELS.keys()),
-        "superres_models": list(SUPERRES_MODELS.keys()),
-        "genre_options": GENRE_OPTIONS,
-        "language_options": LANGUAGE_OPTIONS,
-        "runtime_mode": RUNTIME_MODE,
-    }
-
-
-@app.post("/generate")
-def api_generate(request: GenerateRequest):
-    if STATE.status == "busy":
-        return {"status": "busy", "error": "Worker is currently busy."}
-    if RUNTIME_MODE == "one_shot":
-        return run_generation_one_shot(request)
-    return run_generation(request)
-
-
-@app.get("/download/{filename}")
-def download(filename: str):
-    filepath = os.path.join(OUTPUT_DIR, filename)
-    if not os.path.isfile(filepath):
-        return {"status": "error", "error": f"File not found: {filename}"}
-    media_type = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
-    return FileResponse(filepath, media_type=media_type, filename=filename)
-
-
-# ============================================================
 # Bootstrap
 # ============================================================
 
@@ -1564,9 +1523,24 @@ def cli_has_flag(argv: list[str], flag: str) -> bool:
     return flag in argv
 
 
+def load_request_from_json(path: str) -> GenerateRequest:
+    if not path:
+        raise ValueError("Missing --request-json. Core inference mode expects a JSON request file.")
+    with open(path, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+    return GenerateRequest(**payload)
+
+
+def write_result(result: dict, result_json: str) -> None:
+    if result_json:
+        with open(result_json, "w", encoding="utf-8") as file:
+            json.dump(result, file, ensure_ascii=False, indent=2)
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main() -> None:
     import sys as _sys
-    import uvicorn
     from megatron.training import get_args
     from megatron.training.initialize import initialize_megatron
 
@@ -1586,10 +1560,12 @@ def main() -> None:
     STATE.seed = int(cli_value(_sys.argv, "--seed", "0") or 0)
 
     if runtime_mode == "one_shot" and not child_once:
+        request = load_request_from_json(request_json)
         set_status("idle")
         set_phase("idle", 0, "")
-        print(f"[Worker GPU {STATE.gpu_id}] Starting one-shot shell on http://0.0.0.0:{worker_port}")
-        uvicorn.run(app, host="0.0.0.0", port=worker_port, log_level="warning")
+        print(f"[Worker GPU {STATE.gpu_id}] Running one-shot core inference.")
+        result = run_generation_one_shot(request)
+        write_result(result, result_json)
         return
 
     if child_once and child_stage == "decoder":
@@ -1638,8 +1614,10 @@ def main() -> None:
 
     set_status("idle")
     set_phase("idle", 0, "")
-    print(f"[Worker GPU {STATE.gpu_id}] Starting on http://0.0.0.0:{worker_port}")
-    uvicorn.run(app, host="0.0.0.0", port=worker_port, log_level="warning")
+    request = load_request_from_json(request_json)
+    print(f"[Worker GPU {STATE.gpu_id}] Running keep-loaded core inference.")
+    result = run_generation(request)
+    write_result(result, result_json)
 
 
 if __name__ == "__main__":
