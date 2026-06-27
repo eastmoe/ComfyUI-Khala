@@ -60,7 +60,7 @@ Run the core inference launcher:
 
 ```bash
 cd backend
-bash run_backend.sh --gpus 0 --request-json request.json --result-json result.json
+python run_backend.py --gpus 0 --request-json request.json --result-json result.json
 ```
 
 The default inference path uses Megatron's local transformer implementation and
@@ -88,7 +88,7 @@ Generated audio is written under `backend/generated_audio/`; structured metadata
 ## Remaining Code
 
 - `backend/backend_worker.py`: JSON-driven core inference runner.
-- `backend/run_backend.sh`: thin launcher for one GPU and one request.
+- `backend/run_backend.py`: cross-platform Python launcher for one GPU and one request.
 - `core/`: Khala-specific model patches.
 - `models/Decoder/`: RVQ decoder implementation.
 - `models/Tokenizer/`: tokenizer files.

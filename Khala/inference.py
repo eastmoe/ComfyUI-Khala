@@ -9,12 +9,13 @@ Megatron options to the core worker.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -93,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     io_group.add_argument("--output-format", choices=["wav", "mp3", "both"], default="both")
     io_group.add_argument("--mp3-bitrate", default="320k")
     io_group.add_argument("--ffmpeg-bin", default="ffmpeg")
-    io_group.add_argument("--print-command", action="store_true")
-    io_group.add_argument("--dry-run", action="store_true", help="Build request/command without running models.")
+    io_group.add_argument("--print-command", action="store_true", help="Print the equivalent worker argv.")
+    io_group.add_argument("--dry-run", action="store_true", help="Build request/argv without running models.")
 
     prompt_group = parser.add_argument_group("prompt")
     prompt_group.add_argument("--prompt", "--description", dest="description", default=None)
@@ -165,7 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_group.add_argument("--seed", type=int, default=1283)
     runtime_group.add_argument("--seed-override", type=int, default=0)
     runtime_group.add_argument("--runtime-mode", choices=["one_shot", "keep_loaded"], default="one_shot")
-    runtime_group.add_argument("--python", default=sys.executable)
+    runtime_group.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python executable used for required one-shot worker child processes.",
+    )
     runtime_group.add_argument("--master-addr", default="127.0.0.1")
     runtime_group.add_argument("--master-port", default=os.environ.get("MASTER_PORT", "8791"))
     runtime_group.add_argument("--tokens-per-minute", type=int, default=2584)
@@ -289,14 +294,13 @@ def apply_cli_overrides(request: dict[str, Any], args: argparse.Namespace) -> di
     return request
 
 
-def append_value(command: list[str], flag: str, value: Any) -> None:
+def append_value(argv: list[str], flag: str, value: Any) -> None:
     if value is not None:
-        command.extend([flag, str(value)])
+        argv.extend([flag, str(value)])
 
 
-def build_worker_command(args: argparse.Namespace, request_path: Path) -> list[str]:
-    command = [
-        args.python,
+def build_worker_argv(args: argparse.Namespace, request_path: Path) -> list[str]:
+    worker_argv = [
         str(BACKEND_WORKER),
         "--runtime-mode",
         args.runtime_mode,
@@ -359,26 +363,26 @@ def build_worker_command(args: argparse.Namespace, request_path: Path) -> list[s
     ]
 
     if args.backbone_name:
-        command.extend(["--backbone-name", args.backbone_name])
+        worker_argv.extend(["--backbone-name", args.backbone_name])
     if args.superres_name:
-        command.extend(["--superres-name", args.superres_name])
+        worker_argv.extend(["--superres-name", args.superres_name])
     if args.result_json:
-        command.extend(["--result-json", args.result_json])
-    append_value(command, "--inference-max-requests", args.inference_max_requests)
+        worker_argv.extend(["--result-json", args.result_json])
+    append_value(worker_argv, "--inference-max-requests", args.inference_max_requests)
     append_value(
-        command,
+        worker_argv,
         "--inference-batch-times-seqlen-threshold",
         args.inference_batch_times_seqlen_threshold,
     )
     if args.stream:
-        command.append("--stream")
+        worker_argv.append("--stream")
     if args.enable_cuda_graph:
-        command.append("--enable-cuda-graph")
+        worker_argv.append("--enable-cuda-graph")
     if args.flash_decode:
-        command.append("--flash-decode")
+        worker_argv.append("--flash-decode")
     if args.dtype != "fp32":
-        command.append(f"--{args.dtype}")
-    return command
+        worker_argv.append(f"--{args.dtype}")
+    return worker_argv
 
 
 def build_env(args: argparse.Namespace) -> dict[str, str]:
@@ -396,7 +400,53 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     env["MASTER_PORT"] = str(args.master_port)
     env["PYTHONUNBUFFERED"] = "1"
     env["KHALA_ATTENTION_BACKEND"] = args.attention_backend
+    env["KHALA_PYTHON"] = args.python
     return env
+
+
+@contextmanager
+def worker_process_context(env: dict[str, str]):
+    original_cwd = Path.cwd()
+    original_env = os.environ.copy()
+    original_sys_path = list(sys.path)
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        import_paths = [
+            str(BACKEND_DIR),
+            str(PROJECT_ROOT),
+            str(PROJECT_ROOT / "models" / "Megatron"),
+            str(PROJECT_ROOT / "models" / "Decoder"),
+        ]
+        for path in import_paths:
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        os.chdir(BACKEND_DIR)
+        yield
+    finally:
+        os.chdir(original_cwd)
+        os.environ.clear()
+        os.environ.update(original_env)
+        sys.path[:] = original_sys_path
+
+
+def format_equivalent_command(args: argparse.Namespace, worker_argv: list[str]) -> str:
+    return " ".join([args.python, *worker_argv])
+
+
+def run_worker_in_process(args: argparse.Namespace, worker_argv: list[str]) -> int:
+    with worker_process_context(build_env(args)):
+        backend_worker = importlib.import_module("backend_worker")
+        try:
+            backend_worker.main(worker_argv)
+        except SystemExit as exc:
+            if exc.code is None:
+                return 0
+            if isinstance(exc.code, int):
+                return exc.code
+            print(exc.code, file=sys.stderr)
+            return 1
+    return 0
 
 
 def main() -> int:
@@ -427,19 +477,18 @@ def main() -> int:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(request_path, out_path)
 
-        command = build_worker_command(args, request_path)
-        command.extend(passthrough)
+        worker_argv = build_worker_argv(args, request_path)
+        worker_argv.extend(passthrough)
         if args.print_command:
-            print(" ".join(command))
+            print(format_equivalent_command(args, worker_argv))
         if args.dry_run:
             if not args.print_command:
-                print(" ".join(command))
+                print(format_equivalent_command(args, worker_argv))
             if not args.request_json_out:
                 print(json.dumps(request, ensure_ascii=False, indent=2))
             return 0
 
-        completed = subprocess.run(command, cwd=BACKEND_DIR, env=build_env(args), text=True)
-        return completed.returncode
+        return run_worker_in_process(args, worker_argv)
 
 
 if __name__ == "__main__":

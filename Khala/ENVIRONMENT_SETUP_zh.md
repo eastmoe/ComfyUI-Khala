@@ -46,5 +46,5 @@ checkpoints/
 
 ```bash
 cd backend
-bash run_backend.sh --gpus 0 --request-json request.json --result-json result.json
+python run_backend.py --gpus 0 --request-json request.json --result-json result.json
 ```

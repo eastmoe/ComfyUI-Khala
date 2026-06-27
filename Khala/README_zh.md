@@ -60,7 +60,7 @@ Khala/
 
 ```bash
 cd backend
-bash run_backend.sh --gpus 0 --request-json request.json --result-json result.json
+python run_backend.py --gpus 0 --request-json request.json --result-json result.json
 ```
 
 默认推理路径使用 Megatron 的 `local` transformer 实现，并使用便携的

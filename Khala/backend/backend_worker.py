@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import gc
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import traceback
 import uuid
 import warnings
 from dataclasses import asdict, dataclass
+from contextlib import redirect_stderr, redirect_stdout
 from functools import partial
 
 import numpy as np
@@ -315,7 +317,7 @@ def add_worker_args(parser):
         type=str,
         default="one_shot",
         choices=["keep_loaded", "one_shot"],
-        help="Worker runtime mode: keep models loaded, or spawn one-shot subprocesses per request.",
+        help="Worker runtime mode: keep models loaded, or spawn one-shot child processes per request.",
     )
     group.add_argument("--stream", action="store_true", default=False)
     group.add_argument(
@@ -1243,7 +1245,7 @@ def sync_state_from_file(path: str) -> None:
     STATE.gpu_id = data.get("gpu_id", STATE.gpu_id)
 
 
-def build_one_shot_command(
+def build_one_shot_argv(
     stage: str,
     artifact_dir: str,
     request_path: str,
@@ -1251,9 +1253,8 @@ def build_one_shot_command(
     status_path: str,
     seed_override: int,
 ) -> list[str]:
-    """Construct the subprocess command used by one-shot workers."""
+    """Construct the child argv used by one-shot workers."""
     return [
-        sys.executable,
         os.path.abspath(__file__),
         *filtered_child_args(sys.argv),
         "--seed",
@@ -1272,6 +1273,39 @@ def build_one_shot_command(
         "--status-json",
         status_path,
     ]
+
+
+def run_one_shot_child_process(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str,
+    log_path: str,
+) -> None:
+    """Spawn target for one one-shot stage without encoding state in a shell command."""
+    os.environ.clear()
+    os.environ.update(env)
+    os.chdir(cwd)
+    for path in [BACKEND_DIR, PROJECT_ROOT, MEGATRON_ROOT, DECODER_ROOT]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+    exit_code = 0
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        with redirect_stdout(log_file), redirect_stderr(log_file):
+            try:
+                main(argv)
+            except SystemExit as exc:
+                if exc.code is None:
+                    exit_code = 0
+                elif isinstance(exc.code, int):
+                    exit_code = exc.code
+                else:
+                    print(exc.code, file=sys.stderr)
+                    exit_code = 1
+            except Exception:
+                traceback.print_exc()
+                exit_code = 1
+    raise SystemExit(exit_code)
 
 
 def one_shot_stage_paths(artifact_dir: str) -> dict[str, str]:
@@ -1458,7 +1492,7 @@ def run_generation_one_shot(request: GenerateRequest) -> dict:
                     set_phase(loading_phase_by_stage[stage_name], 0, "")
                     status_path = os.path.join(temp_dir, f"{stage_name}_status.json")
                     log_path = os.path.join(temp_dir, f"{stage_name}.log")
-                    command = build_one_shot_command(
+                    child_argv = build_one_shot_argv(
                         stage_name,
                         temp_dir,
                         request_path,
@@ -1466,24 +1500,23 @@ def run_generation_one_shot(request: GenerateRequest) -> dict:
                         status_path,
                         child_seed,
                     )
-                    print(f"[Worker] Launching one-shot {stage_name} child: {' '.join(command)}")
+                    print(f"[Worker] Launching one-shot {stage_name} child with Python spawn.")
 
-                    env = os.environ.copy()
-                    with open(log_path, "w", encoding="utf-8") as log_file:
-                        proc = subprocess.Popen(
-                            command,
-                            cwd=BACKEND_DIR,
-                            env=env,
-                            stdout=log_file,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                        )
-
-                        while proc.poll() is None:
-                            sync_state_from_file(status_path)
-                            time.sleep(0.5)
-
+                    python_executable = os.environ.get("KHALA_PYTHON", "")
+                    if python_executable:
+                        multiprocessing.set_executable(python_executable)
+                    context = multiprocessing.get_context("spawn")
+                    proc = context.Process(
+                        target=run_one_shot_child_process,
+                        args=(child_argv, os.environ.copy(), BACKEND_DIR, log_path),
+                        name=f"khala-{stage_name}",
+                    )
+                    proc.start()
+                    while proc.is_alive():
                         sync_state_from_file(status_path)
+                        time.sleep(0.5)
+                    proc.join()
+                    sync_state_from_file(status_path)
 
                     if os.path.isfile(result_path):
                         with open(result_path, "r", encoding="utf-8") as file:
@@ -1494,7 +1527,7 @@ def run_generation_one_shot(request: GenerateRequest) -> dict:
                         return {
                             "status": "error",
                             "error": (
-                                f"one_shot {stage_name} child exited with code {proc.returncode} "
+                                f"one_shot {stage_name} child exited with code {proc.exitcode} "
                                 f"without a result file.\n{log_text}"
                             ),
                         }
@@ -1709,86 +1742,95 @@ def write_result(result: dict, result_json: str) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     import sys as _sys
-    from megatron.training import get_args
-    from megatron.training.initialize import initialize_megatron
 
     global RUNTIME_MODE
 
-    worker_port = int(cli_value(_sys.argv, "--worker-port", "8001"))
-    runtime_mode = cli_value(_sys.argv, "--runtime-mode", "one_shot") or "one_shot"
-    child_stage = cli_value(_sys.argv, "--child-stage", "")
-    artifact_dir = cli_value(_sys.argv, "--artifact-dir", "")
-    request_json = cli_value(_sys.argv, "--request-json", "")
-    result_json = cli_value(_sys.argv, "--result-json", "")
-    status_json = cli_value(_sys.argv, "--status-json", "")
-    child_once = cli_has_flag(_sys.argv, "--child-once")
-    RUNTIME_MODE = runtime_mode
-    apply_runtime_config_from_cli(_sys.argv)
-
-    STATE.gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
-    STATE.seed = int(cli_value(_sys.argv, "--seed", "0") or 0)
-
-    if runtime_mode == "one_shot" and not child_once:
-        request = load_request_from_json(request_json)
-        set_status("idle")
-        set_phase("idle", 0, "")
-        print(f"[Worker GPU {STATE.gpu_id}] Running one-shot core inference.")
-        result = run_generation_one_shot(request)
-        write_result(result, result_json)
-        return
-
-    if child_once and child_stage == "decoder":
-        exit_code = run_child_stage(child_stage, request_json, result_json, status_json, artifact_dir)
-        raise SystemExit(exit_code)
-
-    patch_language_model_embedding()
-
-    first_backbone = next(iter(BACKBONE_MODELS.values()))
-    if "--load" not in _sys.argv:
-        _sys.argv.extend(["--load", first_backbone["path"]])
-    if "--vocab-size" not in _sys.argv:
-        _sys.argv.extend(["--vocab-size", str(first_backbone["vocab_size"])])
-    if "--use-checkpoint-args" not in _sys.argv:
-        _sys.argv.append("--use-checkpoint-args")
-
-    print(
-        f"[Worker GPU {STATE.gpu_id}] bootstrap args: "
-        f"--load {first_backbone['path']} "
-        f"--vocab-size {first_backbone['vocab_size']} --use-checkpoint-args"
-    )
-
-    initialize_megatron(
-        extra_args_provider=add_worker_args,
-        args_defaults={
-            "no_load_rng": True,
-            "no_load_optim": True,
-            "micro_batch_size": 1,
-            "exit_on_missing_checkpoint": True,
-        },
-    )
-
-    args = get_args()
-    STATE.seed = args.seed
-    print(f"[Worker GPU {STATE.gpu_id}] Megatron initialized. seed={args.seed}")
-
-    if child_once:
-        exit_code = run_child_stage(child_stage, request_json, result_json, status_json, artifact_dir)
-        raise SystemExit(exit_code)
+    original_argv = _sys.argv
+    if argv is not None:
+        _sys.argv = list(argv)
 
     try:
-        if runtime_mode == "keep_loaded":
-            preload_runtime()
-    except Exception as exc:
-        print(f"[Worker GPU {STATE.gpu_id}] WARNING: preload failed: {exc}")
+        from megatron.training import get_args
+        from megatron.training.initialize import initialize_megatron
 
-    set_status("idle")
-    set_phase("idle", 0, "")
-    request = load_request_from_json(request_json)
-    print(f"[Worker GPU {STATE.gpu_id}] Running keep-loaded core inference.")
-    result = run_generation(request)
-    write_result(result, result_json)
+        worker_port = int(cli_value(_sys.argv, "--worker-port", "8001"))
+        runtime_mode = cli_value(_sys.argv, "--runtime-mode", "one_shot") or "one_shot"
+        child_stage = cli_value(_sys.argv, "--child-stage", "")
+        artifact_dir = cli_value(_sys.argv, "--artifact-dir", "")
+        request_json = cli_value(_sys.argv, "--request-json", "")
+        result_json = cli_value(_sys.argv, "--result-json", "")
+        status_json = cli_value(_sys.argv, "--status-json", "")
+        child_once = cli_has_flag(_sys.argv, "--child-once")
+        RUNTIME_MODE = runtime_mode
+        apply_runtime_config_from_cli(_sys.argv)
+
+        STATE.gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
+        STATE.seed = int(cli_value(_sys.argv, "--seed", "0") or 0)
+
+        if runtime_mode == "one_shot" and not child_once:
+            request = load_request_from_json(request_json)
+            set_status("idle")
+            set_phase("idle", 0, "")
+            print(f"[Worker GPU {STATE.gpu_id}] Running one-shot core inference.")
+            result = run_generation_one_shot(request)
+            write_result(result, result_json)
+            return
+
+        if child_once and child_stage == "decoder":
+            exit_code = run_child_stage(child_stage, request_json, result_json, status_json, artifact_dir)
+            raise SystemExit(exit_code)
+
+        patch_language_model_embedding()
+
+        first_backbone = next(iter(BACKBONE_MODELS.values()))
+        if "--load" not in _sys.argv:
+            _sys.argv.extend(["--load", first_backbone["path"]])
+        if "--vocab-size" not in _sys.argv:
+            _sys.argv.extend(["--vocab-size", str(first_backbone["vocab_size"])])
+        if "--use-checkpoint-args" not in _sys.argv:
+            _sys.argv.append("--use-checkpoint-args")
+
+        print(
+            f"[Worker GPU {STATE.gpu_id}] bootstrap args: "
+            f"--load {first_backbone['path']} "
+            f"--vocab-size {first_backbone['vocab_size']} --use-checkpoint-args"
+        )
+
+        initialize_megatron(
+            extra_args_provider=add_worker_args,
+            args_defaults={
+                "no_load_rng": True,
+                "no_load_optim": True,
+                "micro_batch_size": 1,
+                "exit_on_missing_checkpoint": True,
+            },
+        )
+
+        args = get_args()
+        STATE.seed = args.seed
+        print(f"[Worker GPU {STATE.gpu_id}] Megatron initialized. seed={args.seed}")
+
+        if child_once:
+            exit_code = run_child_stage(child_stage, request_json, result_json, status_json, artifact_dir)
+            raise SystemExit(exit_code)
+
+        try:
+            if runtime_mode == "keep_loaded":
+                preload_runtime()
+        except Exception as exc:
+            print(f"[Worker GPU {STATE.gpu_id}] WARNING: preload failed: {exc}")
+
+        set_status("idle")
+        set_phase("idle", 0, "")
+        request = load_request_from_json(request_json)
+        print(f"[Worker GPU {STATE.gpu_id}] Running keep-loaded core inference.")
+        result = run_generation(request)
+        write_result(result, result_json)
+    finally:
+        if argv is not None:
+            _sys.argv = original_argv
 
 
 if __name__ == "__main__":
